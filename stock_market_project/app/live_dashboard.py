@@ -20,6 +20,38 @@ from feature_engineering import create_features
 from model_training import train_regression_models, evaluate_regression
 from sentiment_analysis import analyze_sentiment
 
+
+# Caching wrappers to avoid repeated blocking network/compute calls on each rerun
+@st.cache_data(ttl=30)
+def get_cached_live_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
+    return live_stock_data.get_live_data(ticker, period=period, interval=interval)
+
+
+@st.cache_data(ttl=30)
+def get_cached_current_price(ticker: str) -> dict:
+    return live_stock_data.get_current_price(ticker)
+
+
+@st.cache_data(ttl=300)
+def get_cached_news(query: str, limit: int = 15) -> pd.DataFrame:
+    return live_news_data.get_live_news(query=query, limit=limit)
+
+
+@st.cache_data(ttl=600)
+def get_cached_hist_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
+    return live_stock_data.get_live_data(ticker, period=period, interval=interval)
+
+
+@st.cache_data(ttl=600)
+def get_cached_trained_models(features_df: pd.DataFrame):
+    # Limit training size to recent rows to keep it responsive
+    if features_df is None or features_df.empty:
+        return None
+    sample_df = features_df.copy()
+    if len(sample_df) > 2000:
+        sample_df = sample_df.tail(2000)
+    return train_regression_models(sample_df)
+
 # Page configuration
 st.set_page_config(
     page_title="Live Stock Market Dashboard",
@@ -337,7 +369,7 @@ def main():
         st.markdown("---")
         st.markdown("💰 **Quick Price View**")
         try:
-            current_data = live_stock_data.get_current_price(selected_ticker)
+            current_data = get_cached_current_price(selected_ticker)
             if 'error' not in current_data:
                 price = current_data.get('current_price', 0)
                 change = price - current_data.get('previous_close', 0)
@@ -355,10 +387,10 @@ def main():
 
     # Main content
     try:
-        # Get live stock data
+        # Get live stock data (cached wrappers to reduce blocking)
         with st.spinner(f"Loading live data for {selected_ticker}..."):
-            df = live_stock_data.get_live_data(selected_ticker, period=period, interval=interval)
-            current_data = live_stock_data.get_current_price(selected_ticker)
+            df = get_cached_live_data(selected_ticker, period, interval)
+            current_data = get_cached_current_price(selected_ticker)
 
         if df.empty:
             st.error(f"No data available for {selected_ticker}")
@@ -390,7 +422,7 @@ def main():
         st.subheader("📰 Live Financial News & Sentiment")
 
         with st.spinner("Loading latest news..."):
-            news_df = live_news_data.get_live_news(limit=15)
+            news_df = get_cached_news(selected_ticker, limit=15)
 
         if not news_df.empty:
             # News display
@@ -425,12 +457,15 @@ def main():
 
         try:
             # Use historical data for predictions
-            hist_df = live_stock_data.get_live_data(selected_ticker, period="2y", interval="1d")
+            hist_df = get_cached_hist_data(selected_ticker, period="2y", interval="1d")
             if not hist_df.empty and len(hist_df) > 100:
                 features = create_features(hist_df)
 
-                with st.spinner("Training ML models..."):
-                    results = train_regression_models(features)
+                if st.sidebar.checkbox("Enable ML Predictions", value=False):
+                    with st.spinner("Training ML models (cached)..."):
+                        results = get_cached_trained_models(features)
+                else:
+                    results = None
 
                 if results:
                     # Display predictions
